@@ -1,0 +1,17 @@
+# Web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Translation
+deep-translator>=1.11.4
+
+# ePub generation
+ebooklib>=0.18
+
+# CLI
+click>=8.1.0
+
+# Utilities
+tqdm>=4.66.0
+Pillow>=10.0.0
