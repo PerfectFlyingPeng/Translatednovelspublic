@@ -16,7 +16,7 @@ import click
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.scraper import NovelScraper
-from src.translator import CachedTranslator
+from src.translator import CachedTranslator, CachedDeepLTranslator
 from src.epub_generator import EpubGenerator
 
 
@@ -38,8 +38,12 @@ from src.epub_generator import EpubGenerator
               help='Delay between scraping requests in seconds (default: 1.0)')
 @click.option('--translate-delay', default=0.5, type=float,
               help='Delay between translation requests in seconds (default: 0.5)')
+@click.option('--translator', type=click.Choice(['google', 'deepl'], case_sensitive=False),
+              default='google', help='Translation service to use (default: google)')
+@click.option('--deepl-api-key', envvar='DEEPL_API_KEY',
+              help='DeepL API key (or set DEEPL_API_KEY env variable)')
 def main(url, output, start, end, source_lang, target_lang, no_translate,
-         scrape_delay, translate_delay):
+         scrape_delay, translate_delay, translator, deepl_api_key):
     """
     Scrape a Chinese web novel, translate it, and generate an ePub file.
 
@@ -82,23 +86,38 @@ def main(url, output, start, end, source_lang, target_lang, no_translate,
         # Step 2: Translate (optional)
         if not no_translate:
             click.echo(f"[2/3] Translating from {source_lang} to {target_lang}...")
+            click.echo(f"Using {translator.upper()} translator...")
             click.echo("This may take a while depending on the number of chapters.")
             click.echo()
 
-            translator = CachedTranslator(
-                source_lang=source_lang,
-                target_lang=target_lang,
-                delay=translate_delay
-            )
+            # Choose translator
+            if translator.lower() == 'deepl':
+                if not deepl_api_key:
+                    click.echo("Error: DeepL API key required. Use --deepl-api-key or set DEEPL_API_KEY environment variable.", err=True)
+                    click.echo("Get your free API key at: https://www.deepl.com/pro-api", err=True)
+                    sys.exit(1)
+
+                translator_obj = CachedDeepLTranslator(
+                    api_key=deepl_api_key,
+                    source_lang='ZH' if source_lang.startswith('zh') else source_lang.upper(),
+                    target_lang='EN-US' if target_lang == 'en' else target_lang.upper(),
+                    delay=translate_delay
+                )
+            else:
+                translator_obj = CachedTranslator(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    delay=translate_delay
+                )
 
             # Translate metadata
-            translator.translate_metadata(metadata)
+            translator_obj.translate_metadata(metadata)
 
             # Translate chapters
-            translator.translate_chapters(chapters, show_progress=True)
+            translator_obj.translate_chapters(chapters, show_progress=True)
 
             click.echo()
-            click.echo(f"✓ Translation complete ({translator.cache_size()} items cached)")
+            click.echo(f"✓ Translation complete ({translator_obj.cache_size()} items cached)")
             click.echo()
         else:
             click.echo("[2/3] Skipping translation (--no-translate flag set)")

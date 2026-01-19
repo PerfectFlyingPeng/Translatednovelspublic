@@ -5,6 +5,7 @@ lxml>=4.9.0
 
 # Translation
 deep-translator>=1.11.4
+deepl>=1.16.0
 
 # ePub generation
 ebooklib>=0.18
