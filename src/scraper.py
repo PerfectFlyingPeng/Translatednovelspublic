@@ -41,31 +41,65 @@ class NovelScraper:
         """
         self.delay = delay
         self.session = requests.Session()
+        # More realistic headers to bypass anti-scraping
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
         })
 
-    def _get_page(self, url: str) -> Optional[BeautifulSoup]:
+    def _get_page(self, url: str, max_retries: int = 3) -> Optional[BeautifulSoup]:
         """
-        Fetch and parse a webpage.
+        Fetch and parse a webpage with retry logic.
 
         Args:
             url: URL to fetch
+            max_retries: Maximum number of retry attempts
 
         Returns:
             BeautifulSoup object or None if failed
         """
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(
+                    url,
+                    timeout=30,
+                    allow_redirects=True,
+                    verify=True
+                )
+                response.raise_for_status()
 
-            # Try to detect encoding
-            response.encoding = response.apparent_encoding or 'utf-8'
+                # Try to detect encoding (important for Chinese content)
+                if response.encoding and response.encoding.lower() in ['iso-8859-1', 'ascii']:
+                    # These are often wrong for Chinese sites
+                    response.encoding = response.apparent_encoding or 'utf-8'
+                elif not response.encoding:
+                    response.encoding = 'utf-8'
 
-            return BeautifulSoup(response.text, 'lxml')
-        except Exception as e:
-            print(f"Error fetching {url}: {e}")
-            return None
+                return BeautifulSoup(response.text, 'lxml')
+
+            except requests.exceptions.ProxyError as e:
+                print(f"Proxy error fetching {url}: {e}")
+                return None  # Don't retry proxy errors
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    print(f"Error fetching {url} (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"Failed to fetch {url} after {max_retries} attempts: {e}")
+                    return None
+
+        return None
 
     def get_metadata(self, url: str) -> Optional[NovelMetadata]:
         """
@@ -215,31 +249,88 @@ class NovelScraper:
                     return text
         return "Untitled Chapter"
 
+    def _is_junk_paragraph(self, text: str) -> bool:
+        """
+        Check if a paragraph is likely junk (navigation, ads, etc.).
+
+        Args:
+            text: Paragraph text to check
+
+        Returns:
+            True if likely junk, False if likely content
+        """
+        # Too short to be real content
+        if len(text) < 15:
+            return True
+
+        # Common navigation patterns (Chinese)
+        junk_patterns = [
+            '上一章', '下一章', '上一页', '下一页',
+            '返回目录', '回目录', '章节目录',
+            '加入书签', '推荐本书', '点击分享',
+            '最新章节', '小说推荐', '更多章节',
+            '继续阅读', '加入收藏', '举报',
+            '本章未完', '点击下一页', '←',  '→',
+            # Author notes
+            '作者的话', '本章说', 'PS:', 'ps:',
+            '作者有话说', '感谢', '求月票', '求推荐',
+            # Common ads
+            'www.', 'http://', 'https://', '.com', '.cn',
+            '最快更新', '无广告', '请记住本站',
+            '手机用户', '电脑用户', 'APP',
+        ]
+
+        text_lower = text.lower()
+        for pattern in junk_patterns:
+            if pattern.lower() in text_lower:
+                return True
+
+        # Check if it's mostly symbols/punctuation
+        alpha_count = sum(1 for c in text if c.isalnum() or ord(c) > 127)  # Include Chinese chars
+        if len(text) > 0 and alpha_count / len(text) < 0.3:
+            return True
+
+        return False
+
     def _extract_chapter_content(self, soup: BeautifulSoup) -> str:
-        """Extract chapter content."""
+        """Extract chapter content with junk filtering."""
         # Try common content selectors
         for selector in ['#content', '.content', '#chapter-content', '.chapter-content',
-                        '.chapter', '#chapter', '.text', '#text']:
+                        '.chapter', '#chapter', '.text', '#text', '.txtnav']:
             element = soup.select_one(selector)
             if element:
-                # Remove script and style elements
-                for tag in element.find_all(['script', 'style', 'nav', 'header', 'footer']):
+                # Remove unwanted tags
+                for tag in element.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
                     tag.decompose()
+
+                # Remove elements with navigation classes
+                for nav_class in ['chapter-nav', 'page-nav', 'navigation', 'ad', 'adbox', 'advertisement']:
+                    for tag in element.find_all(class_=re.compile(nav_class, re.I)):
+                        tag.decompose()
 
                 # Get text with paragraph breaks
                 paragraphs = []
-                for p in element.find_all(['p', 'div']):
+                for p in element.find_all(['p', 'div', 'br']):
                     text = p.get_text(strip=True)
-                    if text and len(text) > 10:  # Filter out short non-content text
+                    # Filter junk paragraphs
+                    if text and not self._is_junk_paragraph(text):
                         paragraphs.append(text)
 
                 if paragraphs:
-                    return '\n\n'.join(paragraphs)
+                    content = '\n\n'.join(paragraphs)
+                    # Final check: content should be substantial
+                    if len(content) > 100:
+                        return content
 
-                # Fallback: get all text
-                text = element.get_text(strip=True)
-                if text and len(text) > 100:
-                    return text
+                # Fallback: get all text and filter
+                all_text = element.get_text(separator='\n', strip=True)
+                lines = [line.strip() for line in all_text.split('\n') if line.strip()]
+                filtered_lines = [line for line in lines if not self._is_junk_paragraph(line)]
+
+                if filtered_lines:
+                    content = '\n\n'.join(filtered_lines)
+                    if len(content) > 100:
+                        return content
 
         return ""
 
